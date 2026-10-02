@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { WebSocketServer } from "ws";
 import type { CodexConversionConfig } from "../../adapter/activation/config.ts";
+import type { RealtimeV3Voice } from "../../adapter/activation/config-contract.ts";
 import type { CodexVoiceAuth } from "../auth.ts";
 import type { CodexVoiceController } from "../controller.ts";
 import type { RealtimePeerPlan } from "../controller-start.ts";
@@ -46,6 +47,7 @@ export async function startCodexLanVoiceServer(options: {
 	let activeConversation: { peer: LanHostRealtimePeer; conversation: CodexRealtimeConversation } | undefined;
 	let conversationStart: { abort: AbortController; promise: Promise<void> } | undefined;
 	let realtimePlan: RealtimePeerPlan | undefined;
+	let nextCallVoice: RealtimeV3Voice | undefined;
 	let closing = false;
 	let clients!: LanVoiceBrowserClients;
 	const activity = new LanVoiceActivity({
@@ -65,6 +67,14 @@ export async function startCodexLanVoiceServer(options: {
 		if (activeConversation) return;
 		if (conversationStart) return conversationStart.promise;
 		if (realtimePlan) return;
+		// Consume once, before any await. The controller retains this snapshot for
+		// reconnects; changing a preference cannot change an existing conversation.
+		const baseConfig = options.getConfig();
+		const callConfig = nextCallVoice === undefined ? baseConfig : {
+			...baseConfig,
+			voice: { ...baseConfig.voice, v3Voice: nextCallVoice },
+		};
+		nextCallVoice = undefined;
 		const abort = new AbortController();
 		let activated = false;
 		const plan: RealtimePeerPlan = {
@@ -106,7 +116,7 @@ export async function startCodexLanVoiceServer(options: {
 		const promise = (async () => {
 			const started = await options.voice.startRealtimeWithPeerPlan(
 				options.ctx,
-				options.getConfig(),
+				callConfig,
 				plan,
 				abort.signal,
 			);
@@ -178,6 +188,12 @@ export async function startCodexLanVoiceServer(options: {
 			renderManifest: () => createLanVoiceWebManifest(options.ctx.ui.theme),
 			renderPage: () => createLanVoiceWebUi(options.ctx.ui.theme),
 			ownerIsActive,
+			ownerSessionId: options.ownerSessionId,
+			selectNextVoice: (voice) => {
+				if (activeConversation || conversationStart || realtimePlan) return false;
+				nextCallVoice = voice;
+				return true;
+			},
 			get closing() { return closing; },
 		});
 	});

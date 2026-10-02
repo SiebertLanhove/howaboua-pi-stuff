@@ -1,10 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { REALTIME_V3_VOICES, type RealtimeV3Voice } from "../../adapter/activation/config-contract.ts";
 import type { LanVoiceBrowserClients } from "./browser-clients.ts";
 import type { LanVoiceActivity } from "./activity.ts";
 import { getLanVoiceAppAsset } from "./app-assets.ts";
 import { LanVoiceDraftError, type LanVoiceDraft } from "./draft.ts";
 
 const MAX_REQUEST_BYTES = 300 * 1024;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 export interface LanVoiceHttpHandlers {
 	activity: LanVoiceActivity;
@@ -14,6 +16,8 @@ export interface LanVoiceHttpHandlers {
 	renderPage(): string;
 	inputMuted(): boolean;
 	ownerIsActive(): boolean;
+	ownerSessionId: string;
+	selectNextVoice(voice: RealtimeV3Voice | undefined): boolean;
 	readonly closing: boolean;
 }
 
@@ -63,10 +67,23 @@ export async function handleLanVoiceHttpRequest(
 			sendJson(response, 404, { error: "Not found" });
 			return;
 		}
+		if (path === "/api/next-call-voice" && !LOOPBACK_HOSTS.has(String(request.socket.remoteAddress || "").toLowerCase()))
+			throw new LanVoiceRequestError(403, "Call voice selection is loopback-only");
 		assertJsonPost(request);
 		const body = await readJson(request);
 		if (!handlers.ownerIsActive() || handlers.closing) {
 			sendJson(response, 409, { error: "The Pi session that started this voice server is no longer active" });
+			return;
+		}
+		if (path === "/api/next-call-voice") {
+			if (body["ownerSessionId"] !== handlers.ownerSessionId)
+				throw new LanVoiceRequestError(409, "Call voice owner does not match the voice server owner");
+			const voice = body["voice"];
+			if (voice !== null && !REALTIME_V3_VOICES.includes(voice as RealtimeV3Voice))
+				throw new LanVoiceRequestError(400, "Invalid realtime voice");
+			if (!handlers.selectNextVoice(voice === null ? undefined : voice as RealtimeV3Voice))
+				throw new LanVoiceRequestError(409, "Voice is fixed for an active or starting call");
+			sendJson(response, 200, { ok: true, voice, appliesTo: "next_call" });
 			return;
 		}
 		const clientId = requiredClientId(body);
